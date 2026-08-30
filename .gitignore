@@ -1,0 +1,12 @@
+# PyInstaller build intermediates (large, not source)
+build/
+
+# temporary build log
+build_log.txt
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Workspace identity & memory notes (personal info, do not publish)
+.workbuddy/

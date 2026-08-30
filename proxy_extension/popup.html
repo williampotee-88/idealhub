@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { font-family: "Microsoft YaHei", sans-serif; width: 260px; padding: 16px;
+           margin: 0; color: #222; }
+    h3 { margin: 0 0 10px 0; font-size: 16px; color: #1f6feb; }
+    .state { padding: 10px 12px; border-radius: 6px; background: #f3f5f8;
+             border: 1px solid #d0d7de; margin-bottom: 10px; font-weight: bold; }
+    .conn { padding: 10px 12px; border-radius: 6px; margin-bottom: 12px;
+            font-weight: bold; font-size: 13px; line-height: 1.4; }
+    .conn.ok { background: #e6ffed; border: 1px solid #2da44e; color: #1a7f37; }
+    .conn.bad { background: #ffebe9; border: 1px solid #cf222e; color: #cf222e; }
+    .on { color: #2da44e; }
+    .off { color: #cf222e; }
+    button { width: 100%; padding: 12px 0; font-size: 15px; border: none;
+             border-radius: 6px; cursor: pointer; color: #fff; }
+    .btn-on { background: #2da44e; }
+    .btn-off { background: #cf222e; }
+    .btn-refresh { background: #1f6feb; margin-top: 8px; padding: 8px 0; font-size: 13px; }
+    .tip { margin-top: 10px; font-size: 11px; color: #888; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <h3>Via A Proxy</h3>
+  <div class="state" id="status">…</div>
+  <div class="conn" id="conn">连接检测中…</div>
+  <button id="toggle">…</button>
+  <button id="refresh" class="btn-refresh">刷新连接状态</button>
+  <p class="tip">代理 127.0.0.1:10800（SOCKS5）。开启后本浏览器走 A 的网络，
+     其余应用仍用 B 本机网络。连接状态每 8 秒自动刷新。</p>
+  <script src="popup.js"></script>
+</body>
+</html>

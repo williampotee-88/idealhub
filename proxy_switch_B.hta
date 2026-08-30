@@ -1,0 +1,128 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>B 机代理开关</title>
+<hta:application id="app"
+  applicationname="B机代理开关"
+  border="thin"
+  caption="yes"
+  windowstate="normal"
+  singleinstance="yes"
+  sysmenu="yes"
+  scroll="no"
+/>
+<style>
+  body { font-family: "Microsoft YaHei", "微软雅黑", sans-serif; font-size: 18px;
+         background:#f3f5f8; color:#222; margin:0; padding:26px; width:460px; }
+  h1 { font-size:24px; margin:0 0 6px 0; color:#1f6feb; }
+  .sub { color:#666; margin:0 0 20px 0; font-size:16px; }
+  .state { padding:16px 18px; border-radius:8px; background:#fff;
+           border:1px solid #d0d7de; margin-bottom:22px; font-weight:bold; font-size:19px; }
+  .row { display:flex; gap:14px; margin-bottom:18px; }
+  button { flex:1; padding:18px 0; font-size:20px; border:none; border-radius:8px;
+           cursor:pointer; color:#fff; font-weight:bold; }
+  .on  { background:#2da44e; }
+  .on:hover { background:#2c974b; }
+  .off { background:#cf222e; }
+  .off:hover { background:#b91c28; }
+  .test { background:#1f6feb; width:100%; padding:16px 0; font-size:19px; }
+  .test:hover { background:#1a5fd0; }
+  button:disabled { background:#c9d1d9; cursor:default; }
+  .log { margin-top:16px; padding:16px; background:#fff; border:1px solid #d0d7de;
+         border-radius:8px; min-height:70px; font-size:16px; white-space:pre-wrap;
+         color:#333; }
+  .tip { margin-top:16px; font-size:14px; color:#888; line-height:1.6; }
+</style>
+</head>
+<body>
+  <h1>B 机代理开关</h1>
+  <p class="sub">经 UU远程端口映射，借 A 机网络上网</p>
+
+  <div class="state" id="state">读取中…</div>
+
+  <div class="row">
+    <button class="on"  id="btnOn"  onclick="setProxy(true)">开启（借 A 上网）</button>
+    <button class="off" id="btnOff" onclick="setProxy(false)">关闭（本机网络）</button>
+  </div>
+
+  <button class="test" onclick="testConn()">测试 A 机代理连通性</button>
+
+  <div class="log" id="log">提示：开启后请重启浏览器生效。</div>
+
+  <p class="tip">前提：A 机已运行 start_proxy_A.bat，且 UU远程端口映射已把 A 的 10800 映射到 B 的 127.0.0.1:10800。</p>
+
+<script language="javascript">
+  var PORT    = "10800";
+  var sh = new ActiveXObject("WScript.Shell");
+  var KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\\";
+
+  function setProxy(on) {
+    try {
+      sh.RegWrite(KEY + "ProxyEnable", on ? 1 : 0, "REG_DWORD");
+      if (on) {
+        sh.RegWrite(KEY + "ProxyServer",
+          "http=127.0.0.1:" + PORT + ";https=127.0.0.1:" + PORT + ";socks=127.0.0.1:" + PORT,
+          "REG_SZ");
+      }
+      log("已" + (on ? "开启" : "关闭") + "系统代理。" + (on ? "请重启浏览器生效。" : "已恢复 B 机自身网络。"));
+      refresh();
+    } catch (e) {
+      log("写入注册表失败：" + e.message);
+    }
+  }
+
+  function isOn() {
+    try { return sh.RegRead(KEY + "ProxyEnable") === 1; }
+    catch (e) { return false; }
+  }
+
+  function refresh() {
+    var on = isOn();
+    document.getElementById("state").innerText =
+      on ? "当前状态：已开启（走 A 机网络）" : "当前状态：已关闭（走 B 机自身网络）";
+    document.getElementById("btnOn").disabled  = on;
+    document.getElementById("btnOff").disabled = !on;
+  }
+
+  function testConn() {
+    var result = "";
+    // 第 1 步：直连本地 10800，确认 UU映射已生效、A 代理端口可达
+    try {
+      var xhr1 = new ActiveXObject("WinHttp.WinHttpRequest.5.1");
+      xhr1.SetProxy(0); // 绕过系统代理，直连本地
+      xhr1.Open("GET", "http://127.0.0.1:" + PORT + "/", false);
+      xhr1.Send();
+      result += "本地 10800 已连通，UU远程映射生效。\n";
+    } catch (e) {
+      log("无法连接 127.0.0.1:" + PORT + "：\n" + e.message +
+          "\n请确认：① A 机 start_proxy_A.bat 在跑；② UU映射已生效（B 的 10800→A 的 10800）。");
+      return;
+    }
+
+    // 第 2 步：用 127.0.0.1:10800 作为代理访问外网 IP 查询站，确认代理功能正常
+    try {
+      var xhr2 = new ActiveXObject("WinHttp.WinHttpRequest.5.1");
+      xhr2.SetProxy(2, "127.0.0.1:" + PORT); // 显式把 10800 当代理
+      xhr2.Open("GET", "http://myip.ipip.net", false);
+      xhr2.Send();
+      if (xhr2.Status === 200) {
+        var txt = xhr2.ResponseText.replace(/<[^>]+>/g, "").replace(/^\s+|\s+$/g, "");
+        result += "代理访问外网成功，出口 IP：\n" + txt;
+      } else {
+        result += "代理访问外网返回 HTTP " + xhr2.Status;
+      }
+      log(result);
+    } catch (e) {
+      result += "代理访问外网失败：\n" + e.message +
+                "\n可能是 A 机本身无法访问 myip.ipip.net，或代理转发异常。";
+      log(result);
+    }
+  }
+
+  function log(msg) { document.getElementById("log").innerText = msg; }
+
+  refresh();
+</script>
+</body>
+</html>
