@@ -1,5 +1,43 @@
 # B 机借助 A 机网络上网（UU远程端口映射 + 双协议代理）
 
+![Build](https://github.com/williampotee-88/idealhub/actions/workflows/build.yml/badge.svg)
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![Platform](https://img.shields.io/badge/platform-Windows-blue)
+
+> 让远程机 B 借助本机 A 的网络上网：A 跑一个双协议代理（SOCKS5 + HTTP），通过 UU远程的端口映射把代理端口转发到 B 的本地，B 把浏览器/系统代理指向它即可。支持全局代理、仅浏览器、指定应用三种粒度，并附带浏览器扩展与可视化状态面板。
+
+## 特性
+
+- **双协议代理**：单端口同时支持 SOCKS5 与 HTTP（含 HTTPS CONNECT 隧道），浏览器 / curl / 各类软件通用
+- **域名在 A 侧解析**：B 机即使没有可用 DNS 也能正常上网，且 DNS 不泄露到 B 本地
+- **三种粒度**：全局系统代理 / 仅浏览器 / 指定应用，按需选择
+- **可视化面板**：A 机浏览器实时查看连接数、活跃连接、最近明细
+- **浏览器扩展**：工具栏一键开关 + 实时连接状态（出口 IP / 对端机器名），只影响当前浏览器
+- **零依赖打包**：PyInstaller 打包成 `proxyA.exe`，目标机无需装 Python
+- **CI 自动构建**：GitHub Actions 自动打包并在打 tag 时发布 Release
+
+## 快速开始
+
+1. **A 机（出口）**：运行 `start_proxy_A.bat`（或拷 `dist/proxyA.exe` 双击），代理监听 `127.0.0.1:10800`，面板在 `127.0.0.1:10801`。
+2. **UU远程**：新增端口映射，方向 **B 本地 `10800` → A `10800`**（让 B 远程连接 A）。
+3. **B 机（借网）**：
+   - 全局：双击 `proxy_switch_B.hta` → 「开启」；
+   - 仅浏览器：双击 `browser_via_A.bat`，或装 `proxy_extension/` 扩展点图标开关。
+4. **验证**：B 机浏览器打开 `https://myip.ipip.net`，显示 A 机 IP 即成功。
+
+## 目录
+
+- [特性](#特性)
+- [快速开始](#快速开始)
+- [架构](#架构)
+- [文件清单](#文件清单)
+- [配置步骤](#配置步骤)
+- [可视化状态面板](#可视化状态面板)
+- [原理说明](#原理说明)
+- [限制与注意](#限制与注意)
+- [安全与信任边界](#安全与信任边界)
+- [故障排查](#故障排查)
+
 ## 架构
 
 ```
@@ -30,13 +68,14 @@ B 机的所有代理流量经 UU远程 隧道送到 A 机，由 A 机代为访�
 | `proxy_extension/` | B 机 | **浏览器扩展（插件）**：工具栏图标一键切换走 A / 本机，并显示实时连接状态（出口 IP / 连不上 A），只影响该浏览器 |
 | `proxy_A_app.py` | A 机 | 打包外壳（自动开面板 + 停止按钮，无 tkinter 依赖） |
 | `build_A_app.bat` | A 机 | 一键把代理打包成 `dist/proxyA.exe`（需本机有 Python + 可联网装 PyInstaller） |
-| `dist/proxyA.exe` | 任意机 | **已生成的独立 exe**，无需 Python，拷到 C 等电脑双击即用 |
+| `dist/proxyA.exe` | 任意机 | 独立 exe 便捷快照，无需 Python，拷到 C 等电脑双击即用（最新版见 Releases） |
+| `LICENSE` | 仓库 | MIT 许可证 |
 
 ## 打包成独立 exe（在 C 电脑运行）
 
 目标：把 A 机脚本打包成 **`proxyA.exe`**，目标机器（如 C 电脑）**无需安装 Python**，双击即用。
 
-**已为你生成**：`dist/proxyA.exe`（约 8.6MB，已内嵌 Python 运行时与代理代码）。直接拷到 C 电脑即可运行。
+仓库 `dist/proxyA.exe` 是**便捷快照**（约 8.6MB，已内嵌 Python 运行时与代理代码），直接拷到 C 电脑即可运行；最新版请从 **Releases / Actions 产物** 获取（见下文「CI 自动构建」）。
 
 **运行方式（C 电脑）**：
 1. 把 `dist/proxyA.exe` 拷到 C，双击运行。
@@ -51,6 +90,16 @@ B 机的所有代理流量经 UU远程 隧道送到 A 机，由 A 机代为访�
   产物在 `dist/proxyA.exe`。
 
 > 注：打包外壳 `proxy_A_app.py` 用「浏览器面板」作为界面（无 tkinter 依赖），所以任意 Windows 都能打包运行。
+
+## CI 自动构建（GitHub Actions）
+
+仓库已内置 `.github/workflows/build.yml`：在 **Windows** runner 上自动用 PyInstaller 打包 `proxyA.exe`。
+
+- **触发**：每次向 `main` 推送，或手动 `Run workflow`；打 `v*` 格式 tag（如 `v1.0`）推送时，自动在 **Releases** 上传 `proxyA.exe`。
+- **获取 exe**：
+  - 开发调试：到仓库 **Actions** 页，点对应运行 → **Artifacts** → 下载 `proxyA-exe`。
+  - 正式发布：到仓库 **Releases** 页，下载对应版本的 `proxyA.exe`。
+- 本地如需自己打包：`build_A_app.bat` 或 `python -m PyInstaller --onefile --noconsole --name proxyA proxy_A_app.py`。
 
 ### 在 C 电脑充当出口机时
 - C 运行 `proxyA.exe` 后，C 即成为此前的「A 机」角色（网络出口）。
@@ -188,6 +237,19 @@ launch_via_A.bat "X:\path\to\app.exe"     # 用 A 的网络打开指定程序
 - 速度受 UU远程隧道带宽与稳定性限制。
 - A 机的代理窗口和 UU远程映射必须保持在线，任一断开则 B 机无法上网（记得先运行 `clear_proxy_B.bat` 再关闭，否则 B 机网络会"假死"）。
 - 系统代理对个别不走系统代理的应用无效（如某些命令行工具），这类应用可在其自身设置里单独配置 SOCKS5 `127.0.0.1:10800`。
+
+## 安全与信任边界
+
+这套方案本质是「把 A 机的网络出口共享给 B 机」，使用前请明确边界：
+
+- **仅用于你信任的设备与账号**：A 机的全部出站 TCP 流量可被 B 机发起（受 UU远程 会话授权约束）。请勿在陌生 / 公共 / 被控设备上开启。
+- **UU远程通道是信任前提**：端口映射依赖 UU远程 的加密隧道与会话授权。若 UU远程 账号泄露或映射被他人借用，等同于把 A 的网络借给了对方。
+- **代理只监听回环地址**：`dual_proxy.py` 仅绑定 `127.0.0.1`，不暴露到局域网；外部流量只能通过 UU远程 映射进入，无法直接被公网访问。
+- **扩展会显示 A 机机器名**：浏览器扩展的连接状态里会展示 A 机的 `hostname`（需映射 `10801` 面板端口）。共享屏幕 / 截图时注意，机器名可能暴露你的设备标识。
+- **仅 TCP**：UDP（部分游戏语音 / 视频）不走此通道，不会因此泄露但也无法代理。
+- **不做流量审计 / 记录**：代理本身不写日志到磁盘、不留存访问内容；状态面板仅在内存中统计连接数。
+
+> 合规提示：仅将本工具用于你有权使用的网络与设备之间（如你自己的多台电脑），勿用于绕过所在网络的安全策略或访问无权资源。
 
 ## 故障排查
 
