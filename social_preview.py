@@ -82,7 +82,7 @@ d.rounded_rectangle([mx - lw / 2 - 12, my - 58, mx + lw / 2 + 12, my - 28], radi
 d.text((mx, my - 43), label, font=lf, fill=(196, 181, 253), anchor="mm")
 
 # 底部仓库地址
-d.text((64, 576), "github.com/williampotee-88/idealhub", font=f(26), fill=(148, 163, 184))
+d.text((64, 576), "github.com/williampotee-88/uu-remote-proxy", font=f(26), fill=(148, 163, 184))
 
 out = "social_preview.png"
 img.save(out, "PNG")

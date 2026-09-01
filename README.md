@@ -1,6 +1,6 @@
 # B 机借助 A 机网络上网（UU远程端口映射 + 双协议代理）
 
-![Build](https://github.com/williampotee-88/idealhub/actions/workflows/build.yml/badge.svg)
+![Build](https://github.com/williampotee-88/uu-remote-proxy/actions/workflows/build.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)
 
