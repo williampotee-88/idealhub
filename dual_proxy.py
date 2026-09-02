@@ -174,6 +174,18 @@ async def _handle_http(c_reader, c_writer, first_byte, tag, bump):
     def bad(msg=b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"):
         c_writer.write(msg)
 
+    # ---- 本地状态查询：直连的 GET /api/status 直接应答，不转发
+    # 说明：经代理转发的请求是绝对 URI 形式（GET http://...），不会命中此分支；
+    # 只有 B 机插件/curl 直连本端口（127.0.0.1:10800/api/status）的探测才会走到这里，
+    # 用于 B 端识别当前借的是哪台 A（返回 host=本机主机名），仅一条端口映射即可工作。
+    if method == "GET" and target.split("?", 1)[0] == "/api/status":
+        body = json.dumps(_status_json(), ensure_ascii=False).encode("utf-8")
+        head = (b"HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\n"
+                b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(body))
+        c_writer.write(head + body)
+        await c_writer.drain()
+        return
+
     # ---- CONNECT（HTTPS 隧道）
     if method == "CONNECT":
         host, port = _split_hostport(target, 443)

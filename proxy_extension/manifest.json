@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Via A Proxy",
-  "version": "1.1",
+  "version": "1.2",
   "description": "Toggle this browser's traffic through A's SOCKS5 proxy at 127.0.0.1:10800, with live connection status. Other apps keep using the local network.",
   "permissions": ["proxy", "storage"],
   "host_permissions": ["<all_urls>"],

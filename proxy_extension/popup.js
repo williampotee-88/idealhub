@@ -34,20 +34,29 @@ async function fetchIp() {
   return null;
 }
 
-// Read the peer machine name from A's local status panel (port 10801).
-// This address is bypassed by the proxy, so it reaches A via the UU mapping
-// directly (requires B:10801 -> A:10801 mapped in UU).
+// Read the peer machine name from A's status API, so the user can tell
+// which A machine this browser is currently borrowing network from.
+// Primary: the proxy port itself (10800) — works with the single existing
+// UU mapping and even with A running --no-panel (dual_proxy answers
+// GET /api/status directly on the proxy port).
+// Fallback: legacy panel port 10801 (requires B:10801 -> A:10801 mapped).
 async function fetchPeerName() {
-  try {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 4000);
-    const r = await fetch("http://127.0.0.1:10801/api/status", { signal: ctrl.signal });
-    clearTimeout(t);
-    if (r.ok) {
-      const d = await r.json();
-      return d.host || null;
-    }
-  } catch (e) { /* panel not mapped / not reachable */ }
+  const urls = [
+    "http://127.0.0.1:10800/api/status",
+    "http://127.0.0.1:10801/api/status"
+  ];
+  for (const u of urls) {
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 4000);
+      const r = await fetch(u, { signal: ctrl.signal });
+      clearTimeout(t);
+      if (r.ok) {
+        const d = await r.json();
+        if (d && d.host) return d.host;
+      }
+    } catch (e) { /* try next endpoint */ }
+  }
   return null;
 }
 
@@ -73,7 +82,7 @@ async function refreshConn() {
     if (ip) {
       conn.textContent = peer
         ? "● 已连接 A（对端：" + peer + "），出口 IP：" + ip
-        : "● 已连接 A，出口 IP：" + ip + "（未映射 10801 面板）";
+        : "● 已连接 A，出口 IP：" + ip + "（A 端为旧版，更新后显示对端名）";
     } else {
       conn.textContent = "✕ 代理已开，但连不上 A（检查 A 机/映射）";
     }
