@@ -24,6 +24,14 @@
     .row input { width: 100%; box-sizing: border-box; padding: 8px 10px; font-size: 13px;
                  border: 1px solid #d0d7de; border-radius: 6px; }
     .saved { font-size: 11px; color: #2da44e; margin-top: 4px; height: 14px; }
+    .err { display: none; margin-top: 8px; padding: 8px 10px; border-radius: 6px;
+           background: #ffebe9; border: 1px solid #cf222e; color: #a40e26;
+           font-size: 11px; line-height: 1.5; word-break: break-all; }
+    .btn-diag { background: #57606a; margin-top: 8px; padding: 8px 0; font-size: 13px; }
+    .diag { display: block; margin: 8px 0 0; padding: 8px 10px; border-radius: 6px;
+            background: #f6f8fa; border: 1px solid #d0d7de; color: #333;
+            font-size: 11px; line-height: 1.6; white-space: pre-wrap;
+            word-break: break-all; max-height: 220px; overflow: auto; }
     .tip { margin-top: 10px; font-size: 11px; color: #888; line-height: 1.5; }
   </style>
 </head>
@@ -32,7 +40,10 @@
   <div class="state" id="status">…</div>
   <div class="conn" id="conn">连接检测中…</div>
   <button id="toggle">…</button>
+  <div class="err" id="err"></div>
   <button id="refresh" class="btn-refresh">刷新连接状态</button>
+  <button id="diag" class="btn-diag">一键诊断</button>
+  <pre class="diag" id="diagout" style="display:none"></pre>
 
   <div class="row">
     <label for="cname">本机终端名称（A 机面板按此显示）</label>

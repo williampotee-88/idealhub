@@ -2,6 +2,15 @@ const btn = document.getElementById("toggle");
 const status = document.getElementById("status");   // 开关状态
 const conn = document.getElementById("conn");        // 连接状态
 const refreshBtn = document.getElementById("refresh");
+const errBox = document.getElementById("err");       // 错误提示
+const diagBtn = document.getElementById("diag");
+const diagOut = document.getElementById("diagout");
+
+function showErr(msg) {
+  if (!errBox) return;
+  errBox.textContent = msg || "";
+  errBox.style.display = msg ? "block" : "none";
+}
 
 // Endpoints that return the client's public IP (used to prove the link works).
 const DETECT = [
@@ -134,10 +143,94 @@ async function refreshConn() {
   conn.className = "conn " + (ip ? "ok" : "bad");
 }
 
+// ---- 开关：切状态 + 立刻给反馈，任何异常都显示出来（不再"点击无反应"）
+let switching = false;
+
+function levelHint(level) {
+  if (!level || level === "controllable_by_this_extension") return null;
+  if (level === "controlled_by_other_extensions")
+    return "代理被其他扩展占用，本扩展无法切换（禁用其他代理扩展后重试）";
+  if (level === "controllable_by_other_extensions")
+    return "其他扩展优先级更高，本扩展的设置不会生效";
+  if (level === "controlled_by_policy")
+    return "代理被组策略/企业策略锁定（chrome://policy 查看），扩展无法修改";
+  return "代理控制权：" + level;
+}
+
 btn.addEventListener("click", () => {
-  chrome.runtime.sendMessage({ type: "toggle" }, () => refreshConn());
+  if (switching) return;
+  switching = true;
+  btn.disabled = true;
+  btn.textContent = "切换中…";
+  showErr("");
+
+  let settled = false;
+  const finish = (res) => {
+    if (settled) return;
+    settled = true;
+    switching = false;
+    btn.disabled = false;
+    res = res || {};
+    const le = (() => { try { return chrome.runtime.lastError; } catch (e) { return null; } })();
+    const msg = res.error || (le && le.message) || levelHint(res.level);
+    if (msg) showErr("切换失败：" + msg);
+    refreshConn();
+  };
+
+  try {
+    chrome.runtime.sendMessage({ type: "toggle" }, finish);
+  } catch (e) {
+    finish({ error: String((e && e.message) || e) });
+  }
+  // 后台万一没响应（service worker 崩溃/未重新加载），也要给出可操作的提示
+  setTimeout(() => finish({
+    error: "后台无响应。请到 chrome://extensions 找到本扩展 → 点“重新加载”，或点 “Service worker / 查看视图” 看报错"
+  }), 8000);
 });
+
 if (refreshBtn) refreshBtn.addEventListener("click", refreshConn);
+
+// ---- 一键诊断：把"为什么切不动/连不上"直接列出来
+if (diagBtn) {
+  diagBtn.addEventListener("click", () => {
+    diagOut.textContent = "诊断中…";
+    diagOut.style.display = "block";
+    let done = false;
+    const finish = (res) => {
+      if (done) return;
+      done = true;
+      const le = (() => { try { return chrome.runtime.lastError; } catch (e) { return null; } })();
+      if (le || !res) {
+        diagOut.textContent = "扩展后台无响应（" + ((le && le.message) || "无返回") +
+          "）。请到 chrome://extensions 重新加载本扩展后重试。";
+        return;
+      }
+      if (res.error) { diagOut.textContent = "读取代理设置失败：" + res.error; return; }
+      const p = res.probe || {};
+      const lines = [
+        "扩展版本: " + res.version,
+        "开关状态: " + (res.enabled ? "开启（走 A）" : "关闭（本机）"),
+        "终端名称: " + (res.clientName || "(未设置)"),
+        "代理控制权: " + res.level +
+          (res.level === "controllable_by_this_extension" ? "  ✅ 可控制" : "  ⚠️ 不可控制"),
+        "当前代理模式: " + (res.mode || "(无)"),
+        "A 状态探测: " + (p.url
+          ? "✅ " + p.url + " (" + (p.ms != null ? p.ms + "ms" : "-") + ")" +
+            (p.host ? "，对端=" + p.host : "") +
+            (p.clients_online != null ? "，在线终端 " + p.clients_online + " 台" : "")
+          : "✕ " + (p.error || "不可达"))
+      ];
+      const hint = levelHint(res.level);
+      if (hint) lines.push("⚠️ " + hint);
+      if (!p.url && res.enabled) lines.push("提示: A 机未运行代理，或 UU 端口映射未开/端口不是 10800");
+      diagOut.textContent = lines.join("\n");
+    };
+    try {
+      chrome.runtime.sendMessage({ type: "diag" }, finish);
+    } catch (e) { finish(null); }
+    setTimeout(() => finish(null), 10000);
+  });
+}
 
 refreshConn();
 // Keep the status live while the popup is open.
