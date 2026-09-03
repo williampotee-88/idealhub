@@ -47,6 +47,46 @@ CLIENT_TTL = 120   # 秒：超过该时间未上报即视为离线（扩展默�
 _LISTEN_HOST = "127.0.0.1"
 _LISTEN_PORT = 10800
 
+# 状态探测用的保留目标：B 端访问 http://<MAGIC_IP>/api/status 时，本代理直接
+# 应答状态 JSON，不会真的去连外网。
+#
+# 为什么需要它：B 端探测 A 状态时原先走的是「直连 127.0.0.1:10800」，而真正
+# 上网的流量走的是「SOCKS5 代理通道」——两条路径并不等价。实践中有 UU 映射只
+# 转发代理通道、或浏览器限制扩展访问本地地址的情况：上网正常（出口 IP 能拿到），
+# 但直连探测超时，弹窗就误报成「A 端为旧版 / 未取到 A 状态」。
+# 让探测走代理通道本身，只要能上网就一定拿得到状态，无需任何额外端口映射。
+#
+# 用 IP 字面量而非域名：客户端对域名会先做本地 DNS 解析，解析失败就直接放弃，
+# 请求根本发不到代理（实测 curl 即如此）；IP 字面量不触发解析，必然走代理。
+# 240.0.0.0/4 是 IANA 保留网段，永远不会分配给真实主机，安全。
+MAGIC_IP = "240.0.0.1"
+MAGIC_HOST = "a-status.proxy"   # 域名形式，双保险（部分客户端可能改写 IP）
+
+
+def _is_magic(host):
+    h = (host or "").lower().rstrip(".")
+    return h == MAGIC_IP or h == MAGIC_HOST
+
+
+async def _answer_status(c_writer, path, tag):
+    """向客户端直接回一份状态 JSON（不连外网）。"""
+    route = path.split("?", 1)[0]
+    if route == "/api/clients":
+        cl = _clients_json()
+        payload = {"clients": cl,
+                   "clients_online": sum(1 for c in cl if c["online"])}
+    else:
+        if route == "/api/status":
+            _register_client(_client_from_query(path),
+                             tag.rpartition(":")[0] if tag else None)
+        payload = _status_json()
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    c_writer.write(b"HTTP/1.1 200 OK\r\n"
+                   b"Content-Type: application/json; charset=utf-8\r\n"
+                   b"Access-Control-Allow-Origin: *\r\n"
+                   b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(body))
+    await c_writer.drain()
+
 
 # ---------------------------------------------------------------- 终端登记
 
@@ -193,6 +233,28 @@ async def _handle_socks5(c_reader, c_writer, tag, bump):
         await c_writer.drain()
         return
 
+    # 状态探测走代理通道：假装连接成功，随后读取明文 HTTP 请求并直接应答，
+    # 不产生任何外网连接。这样只要 B 能借 A 上网，就一定能查到 A 的状态。
+    if _is_magic(host):
+        reply(0x00)
+        await c_writer.drain()
+        try:
+            req = await asyncio.wait_for(c_reader.readuntil(b"\r\n\r\n"),
+                                         timeout=FIRST_BYTE_TIMEOUT)
+        except Exception:
+            return
+        path = "/api/status"
+        try:
+            first = req.split(b"\r\n", 1)[0].decode("latin-1")
+            parts = first.split()
+            if len(parts) >= 2:
+                path = parts[1]
+        except Exception:
+            pass
+        log.info("[%s] 状态查询（经代理） %s", tag, path)
+        await _answer_status(c_writer, path, tag)
+        return
+
     try:
         r_reader, r_writer = await asyncio.open_connection(host, port)
     except Exception as exc:
@@ -236,32 +298,21 @@ async def _handle_http(c_reader, c_writer, first_byte, tag, bump):
     #   absolute-form GET http://127.0.0.1:10800/api/status  （127.0.0.1 未被 bypass，
     #     请求先绕经本代理）。后者若不识别，代理会把请求转发给自己 —— 多一跳自回环，
     #     既慢又白占连接，B 端 4 秒超时就会误判成"连不上 A / A 端旧版"。这里直接应答。
+    #   3. magic-host   GET http://a-status.proxy/api/status（显式走代理通道，
+    #      B 端直连 127.0.0.1 不通时的兜底路径；该域名不解析，不产生外网连接）
     # 经代理访问的正常网站仍是绝对 URI 形式，但指向的是外部主机，不会命中此分支。
     if method == "GET":
-        _path, _self_abs = target, True
+        _path, _local = target, True
         if target.lower().startswith(("http://", "https://")):
             _u = urlsplit(target)
             _h = (_u.hostname or "").lower()
             _p = _u.port or (443 if _u.scheme == "https" else 80)
-            _self_abs = _h in ("127.0.0.1", "localhost", "::1") and _p == _LISTEN_PORT
+            _local = (_is_magic(_h)
+                      or (_h in ("127.0.0.1", "localhost", "::1") and _p == _LISTEN_PORT))
             _path = (_u.path or "/") + (("?" + _u.query) if _u.query else "")
 
-        if _self_abs and _path.split("?", 1)[0] in ("/api/status", "/api/clients"):
-            # 若带 ?client=<终端名>，顺带完成该终端的登记/心跳
-            if _path.split("?", 1)[0] == "/api/status":
-                _register_client(_client_from_query(_path),
-                                 tag.rpartition(":")[0] if tag else None)
-            if _path.split("?", 1)[0] == "/api/clients":
-                _cl = _clients_json()
-                _payload = {"clients": _cl,
-                            "clients_online": sum(1 for c in _cl if c["online"])}
-            else:
-                _payload = _status_json()
-            body = json.dumps(_payload, ensure_ascii=False).encode("utf-8")
-            head = (b"HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\n"
-                    b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(body))
-            c_writer.write(head + body)
-            await c_writer.drain()
+        if _local and _path.split("?", 1)[0] in ("/api/status", "/api/clients"):
+            await _answer_status(c_writer, _path, tag)
             return
 
     # ---- CONNECT（HTTPS 隧道）
@@ -374,6 +425,8 @@ def _status_json():
         "clients": clients,
         "clients_online": sum(1 for c in clients if c["online"]),
         "client_ttl": CLIENT_TTL,
+        # 供 B 端确认本 A 端是否支持「经代理通道的保留地址探测」
+        "magic_ip": MAGIC_IP,
     }
 
 

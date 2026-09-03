@@ -1,4 +1,5 @@
-// Background service worker (MV3): owns the proxy switch state + heartbeat.
+// Background service worker (MV3): owns the proxy switch state, heartbeat,
+// and ALL network probes (the popup only renders what this returns).
 //
 // Order matters: the message listener is registered FIRST (right below),
 // before anything that could throw (alarms, restore-on-startup, ...).
@@ -10,12 +11,26 @@
 
 const PROXY = { scheme: "socks5", host: "127.0.0.1", port: 10800, proxyDNS: true };
 
-// A's status endpoints. The proxy port answers /api/status itself, so the
-// single UU mapping (B:10800 -> A:10800) is enough; 10801 is a legacy fallback.
-const STATUS_URLS = [
-  "http://127.0.0.1:10800/api/status",
-  "http://127.0.0.1:10801/api/status"
+// A's status endpoints, tried in order.
+//
+// Why there are several: browsing traffic goes through the SOCKS5 proxy
+// channel, but "direct to 127.0.0.1" is a DIFFERENT path (loopback is
+// bypassed). Some setups forward only the proxy channel, or the browser
+// restricts extension access to local addresses — the symptom is that
+// browsing works (public IP is shown) while the direct probe times out.
+//
+// So after the direct attempt we probe THROUGH the proxy itself using a
+// reserved IP (240.0.0.1, IANA reserved -> never routed). A answers that
+// request locally instead of dialling out. If browsing works at all, this
+// path works too; it needs no extra port mapping.
+const STATUS_ENDPOINTS = [
+  { url: "http://127.0.0.1:10800/api/status", via: "直连映射" },
+  { url: "http://240.0.0.1/api/status",        via: "经代理通道" },
+  { url: "http://a-status.proxy/api/status",   via: "经代理(域名)" },
+  { url: "http://127.0.0.1:10801/api/status",  via: "面板端口" }
 ];
+
+const PROBE_TIMEOUT = 5000;
 
 function errText(e) {
   try {
@@ -95,6 +110,73 @@ function proxyState() {
   });
 }
 
+// ------------------------------------------------------------------ probing
+// Endpoints that echo the caller's public IP (proves the borrowed link works).
+const DETECT = [
+  "https://api.ipify.org?format=json",
+  "https://ipwho.is/"
+];
+
+function parseIp(text) {
+  try {
+    const j = JSON.parse(text);
+    if (j && j.ip) return j.ip;
+  } catch (e) { /* not JSON */ }
+  const m = text && text.match(/(\d{1,3}\.){3}\d{1,3}/);
+  return m ? m[0] : null;
+}
+
+async function fetchIp() {
+  for (const u of DETECT) {
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 6000);
+      const r = await fetch(u, { signal: ctrl.signal });
+      clearTimeout(t);
+      if (r.ok) {
+        const ip = parseIp(await r.text());
+        if (ip) return ip;
+      }
+    } catch (e) { /* try next endpoint */ }
+  }
+  return null;
+}
+
+// Probe A's status. Records every attempt so the diagnostic can show exactly
+// which path works and which does not (no more guessing).
+async function probeStatus(name) {
+  const q = "?client=" + encodeURIComponent(name || "未命名终端");
+  const attempts = [];
+  for (const ep of STATUS_ENDPOINTS) {
+    const t0 = Date.now();
+    let rec = { url: ep.url, via: ep.via, ok: false };
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT);
+      const r = await fetch(ep.url + q, { signal: ctrl.signal, cache: "no-store" });
+      clearTimeout(t);
+      rec.ms = Date.now() - t0;
+      if (r.ok) {
+        const j = await r.json();
+        rec.ok = true;
+        attempts.push(rec);
+        return {
+          ok: true, url: ep.url, via: ep.via, ms: rec.ms,
+          host: j.host || null,
+          clients_online: (j.clients_online != null ? j.clients_online : null),
+          attempts: attempts
+        };
+      }
+      rec.http = r.status;
+    } catch (e) {
+      rec.ms = Date.now() - t0;
+      rec.err = String((e && e.message) || e);
+    }
+    attempts.push(rec);
+  }
+  return { ok: false, attempts: attempts };
+}
+
 // ----------------------------------------------------------------- heartbeat
 // Report this browser's terminal name to A so A's dashboard can list which
 // machines are borrowing its network. Runs even when the popup is closed.
@@ -104,40 +186,15 @@ async function heartbeat() {
     d = await storageGet(["enabled", "clientName"]);
   } catch (e) { return null; }
   if (!d.enabled) return null;   // not borrowing A's network -> don't register
-  const name = d.clientName || "未命名终端";
-  for (const u of STATUS_URLS) {
-    try {
-      const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), 4000);
-      const r = await fetch(u + "?client=" + encodeURIComponent(name),
-                            { signal: ctrl.signal });
-      clearTimeout(t);
-      if (r.ok) return await r.json();
-    } catch (e) { /* try the next endpoint */ }
+  const st = await probeStatus(d.clientName || "未命名终端");
+  if (st && st.ok) {
+    const keep = { lastPeer: st.host || null, lastVia: st.via || null,
+                   lastProbeAt: Date.now() };
+    storageSet(keep).catch(() => {});
+    return st;
   }
+  storageSet({ lastProbeAt: Date.now() }).catch(() => {});
   return null;
-}
-
-async function probeStatus(name) {
-  for (const u of STATUS_URLS) {
-    const t0 = Date.now();
-    try {
-      const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), 4000);
-      const r = await fetch(u + "?client=" + encodeURIComponent(name || "未命名终端"),
-                            { signal: ctrl.signal });
-      clearTimeout(t);
-      if (r.ok) {
-        const j = await r.json();
-        return { url: u, ms: Date.now() - t0, host: j.host || null,
-                 clients_online: (j.clients_online != null ? j.clients_online : null) };
-      }
-      return { url: u, ms: Date.now() - t0, http: r.status };
-    } catch (e) {
-      // keep going
-    }
-  }
-  return { url: null, error: "两个状态端点均不可达（10800 / 10801）" };
 }
 
 // ------------------------------------------------------------ message router
@@ -145,6 +202,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     try {
       const type = (msg && msg.type) || "";
+
+      // One-shot snapshot for the popup: switch state + public IP + A status.
+      if (type === "status") {
+        const d = await storageGet(["enabled", "clientName", "lastPeer"]);
+        const ps = await proxyState();
+        const en = !!d.enabled;
+        const [ip, st] = await Promise.all([
+          fetchIp(),
+          en ? probeStatus(d.clientName) : Promise.resolve(null)
+        ]);
+        if (st && st.ok && st.host) storageSet({ lastPeer: st.host }).catch(() => {});
+        return sendResponse({
+          enabled: en,
+          level: ps.level || null,
+          mode: ps.mode || null,
+          error: ps.error || null,
+          ip: ip,
+          probe: st,
+          lastPeer: (st && st.ok && st.host) ? st.host : (d.lastPeer || null)
+        });
+      }
 
       if (type === "get") {
         const d = await storageGet("enabled");
