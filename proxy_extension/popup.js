@@ -48,19 +48,31 @@ async function fetchIp() {
 // network. Primary: the proxy port itself (10800) — works with the single
 // existing UU mapping and even with A running --no-panel.
 // Fallback: legacy panel port 10801 (requires B:10801 -> A:10801 mapped).
+// 上次成功拿到的对端名：偶发超时时不至于让显示来回闪
+let lastPeer = null;
+
 async function fetchStatus(clientName) {
+  const q = "?client=" + encodeURIComponent(clientName || "未命名终端");
   for (const base of ["http://127.0.0.1:10800/api/status",
                       "http://127.0.0.1:10801/api/status"]) {
-    try {
-      const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), 4000);
-      const url = base + "?client=" + encodeURIComponent(clientName || "未命名终端");
-      const r = await fetch(url, { signal: ctrl.signal });
-      clearTimeout(t);
-      if (r.ok) return await r.json();
-    } catch (e) { /* try next endpoint */ }
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 5000);
+        const r = await fetch(base + q, { signal: ctrl.signal, cache: "no-store" });
+        clearTimeout(t);
+        if (r.ok) {
+          const j = await r.json();
+          return {
+            ok: true,
+            host: j.host || null,                       // A 的机器名（旧版 A 没有）
+            clients_online: (j.clients_online != null ? j.clients_online : null)
+          };
+        }
+      } catch (e) { /* retry once, then next endpoint */ }
+    }
   }
-  return null;
+  return { ok: false };
 }
 
 function getEnabled() {
@@ -124,14 +136,19 @@ async function refreshConn() {
     fetchIp(),
     en ? fetchStatus(name) : Promise.resolve(null)
   ]);
-  const peer = st && st.host ? st.host : null;
+  if (st && st.ok && st.host) lastPeer = st.host;
+  const peer = lastPeer;
 
   if (en) {
     if (ip) {
-      conn.textContent = peer
-        ? "● 已连接 A（对端：" + peer + "），出口 IP：" + ip +
-          (st && st.clients_online != null ? "，在线终端 " + st.clients_online + " 台" : "")
-        : "● 已连接 A，出口 IP：" + ip + "（A 端为旧版，更新后显示对端名）";
+      let s = peer
+        ? "● 已连接 A（对端：" + peer + "），出口 IP：" + ip
+        : "● 已连接 A，出口 IP：" + ip;
+      if (st && st.ok && st.clients_online != null) s += "，在线终端 " + st.clients_online + " 台";
+      // 区分两种"没有对端名"：A 确实没返回该字段 vs 压根没探到 A
+      if (st && st.ok && !st.host) s += "（A 端版本较旧，未返回机器名）";
+      else if (!st || !st.ok) s += "（未取到 A 状态，点「一键诊断」看原因）";
+      conn.textContent = s;
     } else {
       conn.textContent = "✕ 代理已开，但连不上 A（检查 A 机/映射）";
     }

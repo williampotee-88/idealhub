@@ -230,20 +230,39 @@ async def _handle_http(c_reader, c_writer, first_byte, tag, bump):
     def bad(msg=b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"):
         c_writer.write(msg)
 
-    # ---- 本地状态查询：直连的 GET /api/status 直接应答，不转发
-    # 说明：经代理转发的请求是绝对 URI 形式（GET http://...），不会命中此分支；
-    # 只有 B 机插件/curl 直连本端口（127.0.0.1:10800/api/status）的探测才会走到这里，
-    # 用于 B 端识别当前借的是哪台 A（返回 host=本机主机名），仅一条端口映射即可工作。
-    if method == "GET" and target.split("?", 1)[0] == "/api/status":
-        # 若带 ?client=<终端名>，顺带完成该终端的登记/心跳
-        _register_client(_client_from_query(target),
-                         tag.rpartition(":")[0] if tag else None)
-        body = json.dumps(_status_json(), ensure_ascii=False).encode("utf-8")
-        head = (b"HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\n"
-                b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(body))
-        c_writer.write(head + body)
-        await c_writer.drain()
-        return
+    # ---- 本地状态查询：直接应答，不转发
+    # 两种形式都可能到达，取决于 B 的 bypass 设置：
+    #   origin-form   GET /api/status                        （127.0.0.1 被 bypass，直连）
+    #   absolute-form GET http://127.0.0.1:10800/api/status  （127.0.0.1 未被 bypass，
+    #     请求先绕经本代理）。后者若不识别，代理会把请求转发给自己 —— 多一跳自回环，
+    #     既慢又白占连接，B 端 4 秒超时就会误判成"连不上 A / A 端旧版"。这里直接应答。
+    # 经代理访问的正常网站仍是绝对 URI 形式，但指向的是外部主机，不会命中此分支。
+    if method == "GET":
+        _path, _self_abs = target, True
+        if target.lower().startswith(("http://", "https://")):
+            _u = urlsplit(target)
+            _h = (_u.hostname or "").lower()
+            _p = _u.port or (443 if _u.scheme == "https" else 80)
+            _self_abs = _h in ("127.0.0.1", "localhost", "::1") and _p == _LISTEN_PORT
+            _path = (_u.path or "/") + (("?" + _u.query) if _u.query else "")
+
+        if _self_abs and _path.split("?", 1)[0] in ("/api/status", "/api/clients"):
+            # 若带 ?client=<终端名>，顺带完成该终端的登记/心跳
+            if _path.split("?", 1)[0] == "/api/status":
+                _register_client(_client_from_query(_path),
+                                 tag.rpartition(":")[0] if tag else None)
+            if _path.split("?", 1)[0] == "/api/clients":
+                _cl = _clients_json()
+                _payload = {"clients": _cl,
+                            "clients_online": sum(1 for c in _cl if c["online"])}
+            else:
+                _payload = _status_json()
+            body = json.dumps(_payload, ensure_ascii=False).encode("utf-8")
+            head = (b"HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\n"
+                    b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(body))
+            c_writer.write(head + body)
+            await c_writer.drain()
+            return
 
     # ---- CONNECT（HTTPS 隧道）
     if method == "CONNECT":
