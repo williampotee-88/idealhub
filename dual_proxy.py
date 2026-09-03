@@ -29,7 +29,7 @@ import os
 import socket
 import sys
 import time
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 log = logging.getLogger("dualproxy")
 
@@ -38,8 +38,62 @@ FIRST_BYTE_TIMEOUT = 30  # 秒
 
 # 运行状态统计（单事件循环，无需加锁）
 STATS = {"start_time": None, "total": 0, "active": 0, "recent": []}
+
+# 接入终端登记表：终端名 -> {ip, first, last, beats}
+# B 机的连接在 UU 端口映射后源 IP 都是 A 本机回环，无法靠 IP 区分终端，
+# 因此由 B 端（浏览器扩展 / 脚本）定期上报 ?client=<终端名> 完成登记与心跳。
+CLIENTS = {}
+CLIENT_TTL = 120   # 秒：超过该时间未上报即视为离线（扩展默认每 60 秒心跳一次）
 _LISTEN_HOST = "127.0.0.1"
 _LISTEN_PORT = 10800
+
+
+# ---------------------------------------------------------------- 终端登记
+
+def _register_client(name, ip):
+    """登记一个接入终端（幂等），name 为空时忽略。"""
+    name = (name or "").strip()[:32]
+    if not name:
+        return
+    now = time.time()
+    c = CLIENTS.get(name)
+    if c is None:
+        CLIENTS[name] = {"ip": ip or "-", "first": now, "last": now, "beats": 1}
+        log.info("终端接入: %s (%s)", name, ip or "-")
+    else:
+        if ip:
+            c["ip"] = ip
+        c["last"] = now
+        c["beats"] = c.get("beats", 0) + 1
+
+
+def _client_from_query(target):
+    """从 /api/status?client=XXX 中取出终端名。"""
+    if "?" not in target:
+        return None
+    q = parse_qs(target.split("?", 1)[1], keep_blank_values=False)
+    v = q.get("client") or []
+    return v[0] if v else None
+
+
+def _clients_json():
+    """在线/离线终端列表：名称、来源 IP、状态、接入时长、空闲时长、近 5 分钟连接数。"""
+    now = time.time()
+    out = []
+    for name, c in CLIENTS.items():
+        conns = sum(1 for e in STATS["recent"]
+                    if e.get("ip") == c["ip"] and now - e.get("ts_e", 0) <= 300)
+        out.append({
+            "name": name,
+            "ip": c["ip"],
+            "online": (now - c["last"]) <= CLIENT_TTL,
+            "since": int(now - c["first"]),
+            "idle": int(now - c["last"]),
+            "beats": c.get("beats", 0),
+            "conns5m": conns,
+        })
+    out.sort(key=lambda x: (not x["online"], x["idle"]))
+    return out
 
 
 # ---------------------------------------------------------------- 基础工具
@@ -81,17 +135,19 @@ async def _relay(c_reader, c_writer, r_reader, r_writer, tag):
     await asyncio.gather(t1, t2, return_exceptions=True)
 
 
-def _log_conn(tag, proto, target):
+def _log_conn(tag, proto, target, ip=None):
     """记录一条新的连接（用于状态面板）。"""
     STATS["total"] += 1
     STATS["active"] += 1
     STATS["recent"].append({
         "ts": time.strftime("%H:%M:%S"),
+        "ts_e": time.time(),
         "proto": proto,
         "target": target,
         "client": tag,
+        "ip": ip or (tag.rpartition(":")[0] if tag else "?"),
     })
-    if len(STATS["recent"]) > 200:
+    if len(STATS["recent"]) > 400:
         STATS["recent"].pop(0)
 
 
@@ -179,6 +235,9 @@ async def _handle_http(c_reader, c_writer, first_byte, tag, bump):
     # 只有 B 机插件/curl 直连本端口（127.0.0.1:10800/api/status）的探测才会走到这里，
     # 用于 B 端识别当前借的是哪台 A（返回 host=本机主机名），仅一条端口映射即可工作。
     if method == "GET" and target.split("?", 1)[0] == "/api/status":
+        # 若带 ?client=<终端名>，顺带完成该终端的登记/心跳
+        _register_client(_client_from_query(target),
+                         tag.rpartition(":")[0] if tag else None)
         body = json.dumps(_status_json(), ensure_ascii=False).encode("utf-8")
         head = (b"HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\n"
                 b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(body))
@@ -283,6 +342,7 @@ async def _handle_client(c_reader, c_writer):
 
 def _status_json():
     up = int(time.time() - STATS["start_time"]) if STATS["start_time"] else 0
+    clients = _clients_json()
     return {
         "running": True,
         "host": socket.gethostname(),
@@ -292,6 +352,9 @@ def _status_json():
         "total": STATS["total"],
         "active": STATS["active"],
         "recent": STATS["recent"][-50:],
+        "clients": clients,
+        "clients_online": sum(1 for c in clients if c["online"]),
+        "client_ttl": CLIENT_TTL,
     }
 
 
@@ -313,6 +376,10 @@ def _dashboard_html():
   th,td{text-align:left;padding:10px 14px;font-size:13px;border-bottom:1px solid #334155}
   th{background:#334155;color:#cbd5e1}
   .tag{background:#334155;border-radius:6px;padding:2px 8px;font-size:12px}
+  h2{font-size:15px;margin:22px 0 10px;color:#cbd5e1}
+  .on{color:#22c55e;font-weight:600}
+  .offline{color:#94a3b8}
+  .empty{color:#64748b}
 </style>
 </head>
 <body>
@@ -323,8 +390,15 @@ def _dashboard_html():
     <div class="card"><div class="k">已运行</div><div class="v" id="uptime">-</div></div>
     <div class="card"><div class="k">累计连接</div><div class="v" id="total">0</div></div>
     <div class="card"><div class="k">当前活跃</div><div class="v" id="active">0</div></div>
+    <div class="card"><div class="k">接入终端（在线）</div><div class="v" id="clients">0</div></div>
   </div>
+  <h2>接入终端</h2>
   <table>
+    <thead><tr><th>终端名称</th><th>来源 IP</th><th>状态</th><th>接入时长</th>
+               <th>最后上报</th><th>近 5 分钟连接</th></tr></thead>
+    <tbody id="crows"><tr><td colspan="6">暂无终端上报</td></tr></tbody>
+  </table>
+  <h2>最近连接</h2>
     <thead><tr><th>时间</th><th>协议</th><th>客户端</th><th>目标</th></tr></thead>
     <tbody id="rows"><tr><td colspan="4">暂无连接</td></tr></tbody>
   </table>
@@ -333,8 +407,15 @@ def _dashboard_html():
                  padding:10px 18px;border-radius:8px;cursor:pointer;font-size:14px">
     停止代理
   </button>
-  <p style="color:#64748b;font-size:12px">页面每 1 秒自动刷新。点击「停止代理」即关闭本程序。</p>
+  <p style="color:#64748b;font-size:12px;line-height:1.8">
+    页面每 1 秒自动刷新。停止方式任选：<br>
+    ① 点上方「停止代理」按钮；② 双击 <code>stop_proxy_A.bat</code>；
+    ③ 命令行 <code>curl -X POST http://127.0.0.1:10801/api/stop</code>；
+    ④ 任务管理器结束 <code>proxyA.exe</code> / <code>python.exe</code>。
+  </p>
 <script>
+function esc(s){return String(s).replace(/[&<>"]/g,function(c){
+  return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];});}
 function fmt(s){var h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;return (h>0?h+"h ":"")+m+"m "+x+"s";}
 async function tick(){
   try{
@@ -343,6 +424,17 @@ async function tick(){
     document.getElementById("uptime").textContent=fmt(d.uptime);
     document.getElementById("total").textContent=d.total;
     document.getElementById("active").textContent=d.active;
+    var cl=d.clients||[];
+    document.getElementById("clients").textContent=(d.clients_online||0)+" / "+cl.length;
+    var cb=document.getElementById("crows");
+    if(!cl.length){cb.innerHTML='<tr><td colspan="6" class="empty">暂无终端上报（B 端扩展需为 v1.3+ 且已开启代理）</td></tr>';}
+    else{
+      cb.innerHTML=cl.map(function(c){
+        return '<tr><td><b>'+esc(c.name)+'</b></td><td>'+esc(c.ip)+'</td><td class="'+
+          (c.online?'on':'offline')+'">'+(c.online?'● 在线':'○ 离线')+'</td><td>'+fmt(c.since)+
+          '</td><td>'+(c.idle<3?'刚刚':fmt(c.idle)+'前')+'</td><td>'+c.conns5m+'</td></tr>';
+      }).join('');
+    }
     var tb=document.getElementById("rows");
     if(!d.recent.length){tb.innerHTML='<tr><td colspan="4">暂无连接</td></tr>';return;}
     tb.innerHTML=d.recent.slice().reverse().map(function(e){
@@ -358,6 +450,8 @@ tick();setInterval(tick,1000);
 
 async def _handle_status(reader, writer):
     try:
+        peer = writer.get_extra_info("peername")
+        peer_ip = peer[0] if peer else None
         line = await reader.readline()
         while True:
             h = await reader.readline()
@@ -377,8 +471,18 @@ async def _handle_status(reader, writer):
             asyncio.get_event_loop().call_later(0.3, os._exit, 0)
             return
 
-        if path.startswith("/api/status"):
+        if path.split("?", 1)[0] == "/api/status":
+            # 带 ?client=<终端名> 时完成该终端的登记/心跳
+            _register_client(_client_from_query(path), peer_ip)
             body = json.dumps(_status_json(), ensure_ascii=False).encode("utf-8")
+            head = (b"HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\n"
+                    b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(body))
+            writer.write(head + body)
+        elif path.split("?", 1)[0] == "/api/clients":
+            _cl = _clients_json()
+            body = json.dumps({"clients": _cl,
+                               "clients_online": sum(1 for c in _cl if c["online"])},
+                              ensure_ascii=False).encode("utf-8")
             head = (b"HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\n"
                     b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(body))
             writer.write(head + body)

@@ -34,27 +34,21 @@ async function fetchIp() {
   return null;
 }
 
-// Read the peer machine name from A's status API, so the user can tell
-// which A machine this browser is currently borrowing network from.
-// Primary: the proxy port itself (10800) — works with the single existing
-// UU mapping and even with A running --no-panel (dual_proxy answers
-// GET /api/status directly on the proxy port).
+// Read A's status. The ?client=<name> parameter doubles as this terminal's
+// heartbeat, so A's dashboard can list which machines are borrowing its
+// network. Primary: the proxy port itself (10800) — works with the single
+// existing UU mapping and even with A running --no-panel.
 // Fallback: legacy panel port 10801 (requires B:10801 -> A:10801 mapped).
-async function fetchPeerName() {
-  const urls = [
-    "http://127.0.0.1:10800/api/status",
-    "http://127.0.0.1:10801/api/status"
-  ];
-  for (const u of urls) {
+async function fetchStatus(clientName) {
+  for (const base of ["http://127.0.0.1:10800/api/status",
+                      "http://127.0.0.1:10801/api/status"]) {
     try {
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), 4000);
-      const r = await fetch(u, { signal: ctrl.signal });
+      const url = base + "?client=" + encodeURIComponent(clientName || "未命名终端");
+      const r = await fetch(url, { signal: ctrl.signal });
       clearTimeout(t);
-      if (r.ok) {
-        const d = await r.json();
-        if (d && d.host) return d.host;
-      }
+      if (r.ok) return await r.json();
     } catch (e) { /* try next endpoint */ }
   }
   return null;
@@ -64,6 +58,46 @@ function getEnabled() {
   return new Promise((res) =>
     chrome.storage.local.get("enabled", (d) => res(!!d.enabled))
   );
+}
+
+// ---- 终端名称：A 机面板靠它识别"谁在借网"，存本地，可自行修改
+const nameInput = document.getElementById("cname");
+const savedTip = document.getElementById("saved");
+
+function getClientName() {
+  return new Promise((res) =>
+    chrome.storage.local.get("clientName", (d) => res(d.clientName || ""))
+  );
+}
+
+async function ensureClientName() {
+  let n = await getClientName();
+  if (!n) {
+    n = "B-" + Math.random().toString(36).slice(2, 6).toUpperCase();
+    await chrome.storage.local.set({ clientName: n });
+  }
+  if (nameInput) nameInput.value = n;
+  return n;
+}
+
+function saveClientName() {
+  if (!nameInput) return;
+  const n = (nameInput.value || "").trim().slice(0, 32) || "未命名终端";
+  chrome.storage.local.set({ clientName: n }, () => {
+    if (savedTip) {
+      savedTip.textContent = "已保存：" + n;
+      setTimeout(() => { savedTip.textContent = ""; }, 2000);
+    }
+    refreshConn();
+  });
+}
+
+if (nameInput) {
+  nameInput.addEventListener("change", saveClientName);
+  nameInput.addEventListener("blur", saveClientName);
+  nameInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); nameInput.blur(); }
+  });
 }
 
 async function refreshConn() {
@@ -76,12 +110,18 @@ async function refreshConn() {
   conn.textContent = "连接检测中…";
   conn.className = "conn";
 
-  const [ip, peer] = await Promise.all([fetchIp(), en ? fetchPeerName() : Promise.resolve(null)]);
+  const name = await ensureClientName();
+  const [ip, st] = await Promise.all([
+    fetchIp(),
+    en ? fetchStatus(name) : Promise.resolve(null)
+  ]);
+  const peer = st && st.host ? st.host : null;
 
   if (en) {
     if (ip) {
       conn.textContent = peer
-        ? "● 已连接 A（对端：" + peer + "），出口 IP：" + ip
+        ? "● 已连接 A（对端：" + peer + "），出口 IP：" + ip +
+          (st && st.clients_online != null ? "，在线终端 " + st.clients_online + " 台" : "")
         : "● 已连接 A，出口 IP：" + ip + "（A 端为旧版，更新后显示对端名）";
     } else {
       conn.textContent = "✕ 代理已开，但连不上 A（检查 A 机/映射）";
